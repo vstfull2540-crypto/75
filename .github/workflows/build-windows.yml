@@ -1,0 +1,93 @@
+
+name: Build LA-2A VST3 (Windows)
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Install CMake
+        uses: lukka/get-cmake@latest
+
+      - name: Show toolchain versions
+        shell: pwsh
+        run: |
+          cmake --version
+          git --version
+          cl 2>&1 | Select-Object -First 3
+
+      - name: Configure project
+        run: cmake -S . -B build -A x64 -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build VST3 and Standalone
+        run: cmake --build build --config Release --parallel
+
+      - name: Print build tree on failure
+        if: failure()
+        shell: pwsh
+        run: |
+          if (Test-Path build) {
+            Get-ChildItem build -Recurse -File |
+              Where-Object {
+                $_.Name -match 'error|log|PluginEditor|PluginProcessor'
+              } |
+              Select-Object -First 100 FullName
+          }
+
+      - name: Collect artifacts
+        if: success()
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path artifacts | Out-Null
+
+          $plugins = Get-ChildItem build -Recurse `
+            -Directory -Filter "*.vst3" `
+            -ErrorAction SilentlyContinue
+
+          foreach ($plugin in $plugins) {
+            Copy-Item $plugin.FullName `
+              (Join-Path "artifacts" $plugin.Name) `
+              -Recurse -Force
+          }
+
+          $standalone = Get-ChildItem build -Recurse `
+            -File -Filter "*.exe" `
+            -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match "Standalone" }
+
+          foreach ($exe in $standalone) {
+            Copy-Item $exe.FullName "artifacts" -Force
+          }
+
+          if (-not (Get-ChildItem artifacts -Force |
+              Select-Object -First 1)) {
+            Write-Error "Build succeeded but no VST3 or Standalone artifact was found."
+          }
+
+      - name: Upload VST3 artifacts
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: LA2A-Windows-VST3
+          path: artifacts/**
+          if-no-files-found: error
+          retention-days: 14
